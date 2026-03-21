@@ -3,6 +3,5 @@ __pycache__/
 *.pyc
 .git
 .gitignore
-faiss_index/
 *.ipynb
 .DS_Store
