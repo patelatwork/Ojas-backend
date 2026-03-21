@@ -9,7 +9,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Pre-download the embedding model at build time (no internet needed at runtime)
+# Pre-download the embedding model at build time
 RUN python -c "from langchain_huggingface import HuggingFaceEmbeddings; HuggingFaceEmbeddings(model_name='all-MiniLM-L6-v2')"
 ENV TRANSFORMERS_OFFLINE=1
 
@@ -19,4 +19,5 @@ RUN mkdir -p docs faiss_index
 
 EXPOSE 8000
 
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Use shell form so $PORT variable is expanded by Railway
+CMD uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000}
