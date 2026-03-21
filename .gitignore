@@ -1,0 +1,7 @@
+.env
+__pycache__/
+*.pyc
+*.pyo
+faiss_index/
+*.ipynb
+.DS_Store
