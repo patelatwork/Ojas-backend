@@ -2,6 +2,7 @@ import os
 import shutil
 import traceback
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -20,46 +21,54 @@ DOCS_DIR = Path("docs")
 DOCS_DIR.mkdir(exist_ok=True)
 
 state = {}
+executor = ThreadPoolExecutor(max_workers=1)
+
+
+def _blocking_init():
+    """All heavy synchronous work runs here in a thread — never blocks the event loop."""
+    print("\n[1/4] Loading HuggingFace embeddings...")
+    embeddings = get_embeddings()
+    print("  [1/4] Done.")
+
+    print("\n[2/4] Loading FAISS vector store...")
+    store = load_or_build_index(embeddings)
+    retriever = store.as_retriever(search_kwargs={"k": 5})
+    print("  [2/4] Done.")
+
+    print("\n[3/4] Initializing Groq LLM...")
+    groq_key = os.environ.get("GROQ_API_KEY", "")
+    if not groq_key:
+        raise ValueError("GROQ_API_KEY environment variable is not set!")
+    llm = ChatGroq(
+        api_key=groq_key,
+        model="llama-3.1-8b-instant",
+        temperature=0,
+        max_tokens=1024,
+    )
+    print("  [3/4] Done.")
+
+    print("\n[4/4] Compiling LangGraph pipeline...")
+    graph = build_graph(retriever, llm)
+    print("  [4/4] Done.")
+
+    return embeddings, store, llm, graph
 
 
 async def initialize_pipeline():
-    """Run in background so the app starts up immediately and doesn't time out."""
+    """Offload all blocking work to a thread so the event loop stays free."""
     try:
-        print("\n[1/4] Loading HuggingFace embeddings...")
-        embeddings = get_embeddings()
-        print("  [1/4] Done.")
-
-        print("\n[2/4] Loading FAISS vector store...")
-        store = load_or_build_index(embeddings)
-        retriever = store.as_retriever(search_kwargs={"k": 5})
-        print("  [2/4] Done.")
-
-        print("\n[3/4] Initializing Groq LLM...")
-        groq_key = os.environ.get("GROQ_API_KEY", "")
-        if not groq_key:
-            raise ValueError("GROQ_API_KEY is not set!")
-        llm = ChatGroq(
-            api_key=groq_key,
-            model="llama-3.1-8b-instant",
-            temperature=0,
-            max_tokens=1024,
+        loop = asyncio.get_event_loop()
+        embeddings, store, llm, graph = await loop.run_in_executor(
+            executor, _blocking_init
         )
-        print("  [3/4] Done.")
-
-        print("\n[4/4] Compiling LangGraph pipeline...")
-        graph = build_graph(retriever, llm)
-        print("  [4/4] Done.")
-
         state["store"] = store
         state["embeddings"] = embeddings
         state["graph"] = graph
         state["llm"] = llm
         state["ready"] = True
-
         print("\n✓ OJAS.AI pipeline is ready!\n")
-
     except Exception as e:
-        print(f"\n✗ Pipeline initialization FAILED: {e}")
+        print(f"\n✗ Pipeline FAILED: {e}")
         traceback.print_exc()
         state["ready"] = False
         state["error"] = str(e)
@@ -68,17 +77,16 @@ async def initialize_pipeline():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     print("=" * 50)
-    print("OJAS.AI — Starting (pipeline loading in background)")
+    print("OJAS.AI — Server started, loading pipeline...")
     print("=" * 50)
-    # Start pipeline in background — app becomes available immediately
     asyncio.create_task(initialize_pipeline())
     yield
+    executor.shutdown(wait=False)
     print("OJAS.AI — Shutting down")
 
 
 app = FastAPI(
     title="Ojas.ai Self-RAG API",
-    description="Ayurvedic knowledge assistant powered by Self-RAG and Groq",
     version="1.0.0",
     lifespan=lifespan,
 )
@@ -104,25 +112,16 @@ class ChatResponse(BaseModel):
 @app.get("/health")
 async def health():
     if state.get("error"):
-        return {
-            "status": "error",
-            "pipeline_ready": False,
-            "error": state["error"]
-        }
-    return {
-        "status": "ok" if state.get("ready") else "loading",
-        "pipeline_ready": state.get("ready", False)
-    }
+        return {"status": "error", "pipeline_ready": False, "error": state["error"]}
+    return {"status": "ok" if state.get("ready") else "loading", "pipeline_ready": state.get("ready", False)}
 
 
 @app.post("/chat", response_model=ChatResponse)
 async def chat(req: ChatRequest):
     if state.get("error"):
-        raise HTTPException(status_code=500, detail=f"Pipeline failed to start: {state['error']}")
-
+        raise HTTPException(status_code=500, detail=f"Pipeline error: {state['error']}")
     if not state.get("ready"):
-        raise HTTPException(status_code=503, detail="Pipeline is still loading, please wait 1-2 minutes and try again.")
-
+        raise HTTPException(status_code=503, detail="Pipeline is still loading, try again in a moment.")
     if not req.question.strip():
         raise HTTPException(status_code=400, detail="Question cannot be empty.")
 
@@ -141,7 +140,10 @@ async def chat(req: ChatRequest):
         "use_reason": "",
     }
 
-    result = state["graph"].invoke(initial, config={"recursion_limit": 80})
+    result = await asyncio.get_event_loop().run_in_executor(
+        executor,
+        lambda: state["graph"].invoke(initial, config={"recursion_limit": 80})
+    )
 
     return ChatResponse(
         answer=result.get("answer", ""),
@@ -155,7 +157,6 @@ async def chat(req: ChatRequest):
 async def upload_document(file: UploadFile = File(...)):
     if not file.filename.endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are supported.")
-
     if not state.get("ready"):
         raise HTTPException(status_code=503, detail="Pipeline not ready yet.")
 
@@ -164,19 +165,12 @@ async def upload_document(file: UploadFile = File(...)):
         shutil.copyfileobj(file.file, f)
 
     try:
-        chunks_added = add_documents_to_index(
-            str(save_path),
-            state["store"],
-            state["embeddings"],
-        )
+        chunks_added = add_documents_to_index(str(save_path), state["store"], state["embeddings"])
     except Exception as e:
         save_path.unlink(missing_ok=True)
         raise HTTPException(status_code=500, detail=f"Failed to index PDF: {str(e)}")
 
-    return {
-        "message": f"Successfully uploaded and indexed '{file.filename}'",
-        "chunks_added": chunks_added,
-    }
+    return {"message": f"Uploaded and indexed '{file.filename}'", "chunks_added": chunks_added}
 
 
 @app.get("/documents")
