@@ -40,8 +40,9 @@ def build_index(embeddings):
 
 
 def load_or_build_index(embeddings):
-    """Load saved index if it exists, otherwise build from docs/."""
-    if INDEX_DIR.exists() and any(INDEX_DIR.iterdir()):
+    """Load saved index if the actual index file exists, otherwise build from docs/."""
+    index_file = INDEX_DIR / "index.faiss"  # check for the real file, not just the folder
+    if index_file.exists():
         print(f"  Loading existing index from {INDEX_DIR}/")
         return FAISS.load_local(
             str(INDEX_DIR),
