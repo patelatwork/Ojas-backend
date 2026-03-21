@@ -1,5 +1,6 @@
 import os
 import shutil
+import traceback
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -17,7 +18,6 @@ load_dotenv()
 DOCS_DIR = Path("docs")
 DOCS_DIR.mkdir(exist_ok=True)
 
-# Global runtime state — loaded once at startup
 state = {}
 
 
@@ -27,37 +27,61 @@ async def lifespan(app: FastAPI):
     print("OJAS.AI — Starting up")
     print("=" * 50)
 
-    print("\n[1/4] Loading HuggingFace embeddings (all-MiniLM-L6-v2)...")
-    embeddings = get_embeddings()
-    print("  Done.")
+    try:
+        print("\n[1/4] Loading HuggingFace embeddings...")
+        embeddings = get_embeddings()
+        print("  Done.")
+    except Exception as e:
+        print(f"  FAILED at step 1: {e}")
+        traceback.print_exc()
+        raise
 
-    print("\n[2/4] Loading FAISS vector store...")
-    store = load_or_build_index(embeddings)
-    retriever = store.as_retriever(search_kwargs={"k": 5})
-    print("  Done.")
+    try:
+        print("\n[2/4] Loading FAISS vector store...")
+        store = load_or_build_index(embeddings)
+        retriever = store.as_retriever(search_kwargs={"k": 5})
+        print("  Done.")
+    except Exception as e:
+        print(f"  FAILED at step 2: {e}")
+        traceback.print_exc()
+        raise
 
-    print("\n[3/4] Initializing Groq LLM (llama-3.1-8b-instant)...")
-    llm = ChatGroq(
-        api_key=os.environ["GROQ_API_KEY"],
-        model="llama-3.1-8b-instant",
-        temperature=0,
-        max_tokens=1024,
-    )
-    print("  Done.")
+    try:
+        print("\n[3/4] Initializing Groq LLM...")
+        groq_key = os.environ.get("GROQ_API_KEY", "")
+        if not groq_key:
+            raise ValueError("GROQ_API_KEY environment variable is not set!")
+        llm = ChatGroq(
+            api_key=groq_key,
+            model="llama-3.1-8b-instant",
+            temperature=0,
+            max_tokens=1024,
+        )
+        print("  Done.")
+    except Exception as e:
+        print(f"  FAILED at step 3: {e}")
+        traceback.print_exc()
+        raise
 
-    print("\n[4/4] Compiling LangGraph Self-RAG pipeline...")
-    graph = build_graph(retriever, llm)
-    print("  Done.")
+    try:
+        print("\n[4/4] Compiling LangGraph pipeline...")
+        graph = build_graph(retriever, llm)
+        print("  Done.")
+    except Exception as e:
+        print(f"  FAILED at step 4: {e}")
+        traceback.print_exc()
+        raise
 
     state["store"] = store
     state["embeddings"] = embeddings
     state["graph"] = graph
+    state["llm"] = llm
 
     print("\n" + "=" * 50)
-    print("OJAS.AI — Ready to serve requests")
+    print("OJAS.AI — Ready!")
     print("=" * 50 + "\n")
 
-    yield  # App runs here
+    yield
 
     print("OJAS.AI — Shutting down")
 
@@ -71,13 +95,11 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Lock this down to your frontend URL in production
+    allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-
-# ─── Request / Response models ───────────────────────────────────────────────
 
 class ChatRequest(BaseModel):
     question: str
@@ -89,8 +111,6 @@ class ChatResponse(BaseModel):
     evidence: list[str] = []
 
 
-# ─── Endpoints ────────────────────────────────────────────────────────────────
-
 @app.get("/health")
 async def health():
     return {"status": "ok", "pipeline_ready": "graph" in state}
@@ -100,7 +120,7 @@ async def health():
 async def chat(req: ChatRequest):
     graph = state.get("graph")
     if not graph:
-        raise HTTPException(status_code=503, detail="Pipeline not ready yet. Try again in a moment.")
+        raise HTTPException(status_code=503, detail="Pipeline not ready yet.")
 
     if not req.question.strip():
         raise HTTPException(status_code=400, detail="Question cannot be empty.")
@@ -156,26 +176,6 @@ async def upload_document(file: UploadFile = File(...)):
         "message": f"Successfully uploaded and indexed '{file.filename}'",
         "chunks_added": chunks_added,
     }
-
-
-@app.delete("/documents/{filename}")
-async def delete_document(filename: str):
-    pdf_path = DOCS_DIR / filename
-    if not pdf_path.exists():
-        raise HTTPException(status_code=404, detail=f"'{filename}' not found.")
-
-    pdf_path.unlink()
-
-    # Rebuild the index without the deleted file
-    print(f"Rebuilding index after deleting {filename}...")
-    from vector_store import build_index
-    state["store"] = build_index(state["embeddings"])
-    state["graph"] = build_graph(
-        state["store"].as_retriever(search_kwargs={"k": 5}),
-        state.get("llm"),
-    )
-
-    return {"message": f"'{filename}' deleted and index rebuilt."}
 
 
 @app.get("/documents")
