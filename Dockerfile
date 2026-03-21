@@ -1,25 +1,20 @@
 FROM python:3.11-slim
 
-# System deps needed for sentence-transformers + faiss
 RUN apt-get update && apt-get install -y \
     build-essential \
-    git \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Install Python deps first (layer cache — only re-runs if requirements.txt changes)
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Pre-download the HuggingFace embedding model at BUILD time
-# so startup is fast and the container needs no internet access at runtime
+# Pre-download the embedding model at build time (no internet needed at runtime)
 RUN python -c "from langchain_huggingface import HuggingFaceEmbeddings; HuggingFaceEmbeddings(model_name='all-MiniLM-L6-v2')"
+ENV TRANSFORMERS_OFFLINE=1
 
-# Copy app code
 COPY . .
 
-# Create directories (docs/ for PDFs, faiss_index/ for the vector store)
 RUN mkdir -p docs faiss_index
 
 EXPOSE 8000
