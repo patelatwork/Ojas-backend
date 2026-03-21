@@ -5,3 +5,4 @@ __pycache__/
 .gitignore
 *.ipynb
 .DS_Store
+faiss_index/
