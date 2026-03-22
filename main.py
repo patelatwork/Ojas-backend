@@ -104,9 +104,6 @@ class ChatRequest(BaseModel):
 
 class ChatResponse(BaseModel):
     answer: str
-    issup: str | None = None
-    isuse: str | None = None
-    evidence: list[str] = []
 
 
 @app.get("/health")
@@ -145,12 +142,7 @@ async def chat(req: ChatRequest):
         lambda: state["graph"].invoke(initial, config={"recursion_limit": 80})
     )
 
-    return ChatResponse(
-        answer=result.get("answer", ""),
-        issup=result.get("issup"),
-        isuse=result.get("isuse"),
-        evidence=result.get("evidence", []),
-    )
+    return ChatResponse(answer=result.get("answer", ""))
 
 
 @app.post("/documents/upload")
