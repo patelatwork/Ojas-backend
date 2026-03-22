@@ -216,8 +216,8 @@ def build_graph(retriever, llm):
         ("human", "QUESTION:\n{question}\n\nPrevious retrieval query:\n{retrieval_query}\n\nAnswer:\n{answer}"),
     ])
 
-    MAX_RETRIES = 10
-    MAX_REWRITE_TRIES = 3
+    MAX_RETRIES = 2
+    MAX_REWRITE_TRIES = 1
 
     # --- Node functions ---
     def decide_retrieval(state: State):
