@@ -41,7 +41,7 @@ def _blocking_init():
         raise ValueError("GROQ_API_KEY environment variable is not set!")
     llm = ChatGroq(
         api_key=groq_key,
-        model="llama-3.2-3b-preview",
+        model="llama-3.1-8b-instant",
         temperature=0,
         max_tokens=1024,
     )
